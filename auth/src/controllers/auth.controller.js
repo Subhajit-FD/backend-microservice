@@ -3,193 +3,150 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const redis = require("../db/redis");
 
-const registerUser = async (req, res) => {
-  const {
-    username,
-    email,
-    password,
-    fullname: { firstname, lastname },
-    role
-  } = req.body;
-  const existingUser = await userModel.findOne({
-    $or: [{ email }, { username }],
-  });
-  if (existingUser) {
-    return res
-      .status(409)
-      .json({ message: "Username or email already exists" });
-  }
-  try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const user = await userModel.create({
-      username,
-      email,
-      password: hashedPassword,
-      fullname: {
-        firstname,
-        lastname,
-      },
-      role
+const register = async (req,res) =>{
+    const {username,email,password,fullname:{firstName,lastName}} = req.body;
+
+    const isUserExist = await userModel.findOne({ $or: [{ email }, { username }] });
+
+    if(isUserExist){
+        return res.status(400).json({message:"User already exists"});
+    }
+    const hashedPassword = await bcrypt.hash(password,10);
+
+    const newUser = await userModel.create({
+        username,
+        email,
+        password:hashedPassword,
+        fullname:{firstName,lastName}
     });
-    const token = jwt.sign(
-      {
-        id: user._id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: "1h" },
-    );
+
+    const token = jwt.sign({id:newUser._id, role:newUser.role, fullName:newUser.fullname, username:newUser.username}, process.env.JWT_SECRET, {expiresIn:"1d"});
 
     res.cookie("token", token, {
-      httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000,
-      secure: true,
+        httpOnly: true,
+        secure: true,
+        sameSite: "strict",
+        maxAge: 24 * 60 * 60 * 1000, // 1 day
     });
 
-    res.status(201).json({ message: "User registered successfully" });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Internal server error", error: error.message });
-  }
-};
+    res.status(201).json({message:"User registered successfully", user: newUser});
+}
 
-const loginUser = async (req, res) => {
-  const {username, email, password } = req.body;
-  try {
-    const user = await userModel.findOne({ $or: [{ email }, { username }] }).select("+password");
+const login = async (req,res) =>{
+    const {username,email,password} = req.body;
 
-    if (!user) {
-      return res.status(401).json({ message: "Invalid email or password" });
+    const user = await userModel.findOne({ $or: [{ email }, { username }] });
+
+    if(!user){
+        return res.status(400).json({message:"Invalid credentials"});
     }
+    const isPasswordValid = await bcrypt.compare(password,user.password);
 
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-
-    if (!isPasswordValid) {
-      return res.status(401).json({ message: "Invalid email or password" });
+    if(!isPasswordValid){
+        return res.status(400).json({message:"Invalid credentials"});
     }
-    const token = jwt.sign(
-      {
-        id: user._id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: "1d" },
-    );
+    const token = jwt.sign({id:user._id, role:user.role, fullName:user.fullname, username:user.username}, process.env.JWT_SECRET, {expiresIn:"1d"});
 
     res.cookie("token", token, {
-      httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000,
-      secure: true,
+        httpOnly: true,
+        secure: true,
+        sameSite: "strict",
+        maxAge: 24 * 60 * 60 * 1000, // 1 day
     });
 
-    res.status(200).json({ message: "Login successful" });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Internal server error", error: error.message });
-  }
-};
-
-const getCurrentUser = async (req, res) => {
-  return res.status(200).json({ 
-    message: "Current user fetched successfully",
-    user: req.user });
+    res.status(200).json({message:"Login successful", user: user});
 }
 
-const logoutUser = async (req, res) => {
-
-  const token = req.cookies.token;
-  if (!token) {
-    return res.status(401).json({ message: "No token provided" });
-  }
-  try {
-    await redis.set(`blacklist:${token}`, "true", "EX", 60 * 60 * 24);
-    res.clearCookie("token",{httpOnly:true,secure:true});
-    res.status(200).json({ message: "Logout successful" });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Internal server error", error: error.message });
-  }
+const getCurrentUser = async (req,res) =>{
+    res.status(200).json({user:req.user, message:"User details retrieved successfully"});
 }
 
-const getUserAddresses = async (req, res) => {
-  const id = req.user.id;
-  const user = await userModel.findById(id).select("addresses").lean();
-  if(!user){
-    return res.status(404).json({ message: "User not found" });
-  }
-  try {
-    const addresses = user.addresses;
-    return res.status(200).json({ addresses });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Internal server error", error: error.message });
-  }
+const logout = async (req,res) =>{
+    const token = req.cookies.token;
+
+    if (!token) {
+        return res.status(400).json({ message: "No token provided." });
+    }
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        await redis.setex(`blacklist_${decoded}`,"true",24 * 60 * 60);
+        res.clearCookie("token",{
+            httpOnly: true,
+            secure: true,
+            sameSite: "strict"
+        });
+        return res.status(200).json({ message: "Logout successful." });
+    } catch (error) {
+        return res.status(400).json({ message: "Invalid token." });
+    }
 }
 
-const addUserAddress = async (req, res) => {
-  const id = req.user.id;
-  const { street, city, state, pincode, country, isDefault } = req.body;
-  const user = await userModel.findOneAndUpdate(
-    { _id: id },
-    { $push: { addresses: { street, city, state, pincode, country, isDefault } } },
-    { new: true }
-  );
-  if(!user){
-    return res.status(404).json({ message: "User not found" });
-  }
-  try {
-    return res.status(201).json({ message: "Address added successfully" });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Internal server error", error: error.message });
-  }
+const getUserAddresses = async (req,res)=>{
+    const id = req.user.id
+    const user = await userModel.findById(id);
+
+    if(!user){
+        return res.status(404).json({message: "user not found"})
+    }
+
+    return res.status(200).json({
+        message: "user addresses retrived sucessfully",
+        addresses:user.addresses
+    });
 }
 
-const deleteUserAddress = async (req, res) => {
-  const id = req.user.id;
-  const { addressId } = req.params;
+const addUserAddress = async (req,res) =>{
+    const id = req.user.id
+    const {street, city, state, pincode, isDefault} = req.body;
+    const user = await userModel.findOneAndUpdate({_id:id},{
+        $push:{
+            address:{street, city, state, pincode, isDefault}
+        }
+    },{new:true});
 
-  const isAddressExist = await userModel.findOne({
-    _id: id,
-    addresses: { $elemMatch: { _id: addressId } }
-  });
+    if(!user){
+        return res.status(404).json({message: "user not found"})
+    }
 
-  if(!isAddressExist){
-    return res.status(404).json({ message: "Address not found" });
-  }
+    res.status(201).json({
+        message: "Address added successfully",
+        addresses:user.addresses[user.addresses.length - 1]
+    });
+}
 
-  const user = await userModel.findOneAndUpdate(
-    { _id: id },
-    { $pull: { addresses: { _id: addressId } } },
-    { new: true }
-  );
-  if(!user){
-    return res.status(404).json({ message: "User not found" });
-  }
-  try {
-    return res.status(200).json({ message: "Address deleted successfully" });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Internal server error", error: error.message });
-  }
+const deleteUserAddress = async (req,res) =>{
+    const id = req.user.id
+    const addressId = req.params.addressId;
+
+    const isAddressExist = await userModel.findOne({_id:id, "address._id":addressId});
+
+    if(!isAddressExist){
+        return res.status(404).json({message: "Address not found"})
+    }
+
+    const user = await userModel.findOneAndUpdate({_id:id},{
+        $pull:{
+            address:{_id:addressId}
+        }
+    },{new:true});
+
+    if(!user){
+        return res.status(404).json({message: "user not found"})
+    }
+
+    res.status(200).json({
+        message: "Address deleted successfully",
+        addresses:user.addresses
+    });
+
 }
 
 module.exports = {
-  registerUser,
-  loginUser,
-  getCurrentUser,
-  logoutUser,
-  getUserAddresses,
-  addUserAddress,
-  deleteUserAddress
-};
+    register,
+    login,
+    getCurrentUser,
+    logout,
+    getUserAddresses,
+    addUserAddress,
+    deleteUserAddress
+}
